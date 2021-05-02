@@ -21,7 +21,8 @@ PYBIND11_MODULE(pycolmap, m) {
 
     // Absolute pose from multiple images.
     m.def("absolute_generalized_pose_estimation", &absolute_generalized_pose_estimation,
-          py::arg("points2D"), py::arg("points3D"), py::arg("extrinsics"), 
+          py::arg("points2D"), py::arg("points3D"), 
+          py::arg("tel_tforms"),
           py::arg("camera_dicts"),
           py::arg("max_error_px") = 12.0,
           "Multi image absolute pose estimation with non-linear refinement.");

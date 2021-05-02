@@ -33,7 +33,7 @@
 #include <fstream>
 
 #include "colmap/base/camera.h"
-#include "colmap/estimators/pose.h"
+#include "colmap/estimators/generalized_pose.h"
 #include "colmap/util/random.h"
 
 using namespace colmap;
@@ -44,10 +44,11 @@ using namespace colmap;
 
 namespace py = pybind11;
 
-py::dict absolute_pose_estimation(
+py::dict generalized_absolute_pose_estimation(
         const std::vector<Eigen::Vector2d> points2D,
         const std::vector<Eigen::Vector3d> points3D,
-        const py::dict camera_dict,
+        const std::vector<Eigen::Matrix3x4d> rel_tforms,
+        const std::vector<py::dict> camera_dicts,
         const double max_error_px
 ) {
     SetPRNGSeed(0);
@@ -60,6 +61,8 @@ py::dict absolute_pose_estimation(
     failure_dict["success"] = false;
 
     // Create camera.
+    // TODO: handle multiple cameras
+    auto camera_dict = camera_dicts[0];
     Camera camera;
     camera.SetModelIdFromName(camera_dict["model"].cast<std::string>());
     camera.SetWidth(camera_dict["width"].cast<size_t>());
@@ -81,7 +84,7 @@ py::dict absolute_pose_estimation(
     size_t num_inliers;
     std::vector<char> inlier_mask;
 
-    if (!EstimateAbsolutePose(abs_pose_options, points2D, points3D, &qvec, &tvec, &camera, &num_inliers, &inlier_mask)) {
+    if (!EstimateGeneralizedAbsolutePose(abs_pose_options, points2D, points3D, rel_tforms, &qvec, &tvec, &camera, &num_inliers, &inlier_mask)) {
         return failure_dict;
     }
 
@@ -92,7 +95,7 @@ py::dict absolute_pose_estimation(
     abs_pose_refinement_options.print_summary = false;
 
     // Absolute pose refinement.
-    if (!RefineAbsolutePose(abs_pose_refinement_options, inlier_mask, points2D, points3D, &qvec, &tvec, &camera)) {
+    if (!RefineAbsolutePose(abs_pose_refinement_options, inlier_mask, points2D, points3D, rel_tforms, &qvec, &tvec, &camera)) {
         return failure_dict;
     }
 
