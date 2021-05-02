@@ -47,7 +47,8 @@ namespace py = pybind11;
 py::dict generalized_absolute_pose_estimation(
         const std::vector<Eigen::Vector2d> points2D,
         const std::vector<Eigen::Vector3d> points3D,
-        const std::vector<Eigen::Matrix3x4d> rel_tforms,
+        const std::vector<int> cam_idxs,
+        const std::vector<Eigen::Matrix3x4d> rel_camera_poses,
         const std::vector<py::dict> camera_dicts,
         const double max_error_px
 ) {
@@ -60,17 +61,20 @@ py::dict generalized_absolute_pose_estimation(
     py::dict failure_dict;
     failure_dict["success"] = false;
 
-    // Create camera.
-    // TODO: handle multiple cameras
-    auto camera_dict = camera_dicts[0];
-    Camera camera;
-    camera.SetModelIdFromName(camera_dict["model"].cast<std::string>());
-    camera.SetWidth(camera_dict["width"].cast<size_t>());
-    camera.SetHeight(camera_dict["height"].cast<size_t>());
-    camera.SetParams(camera_dict["params"].cast<std::vector<double>>());
+    // Create cameras.
+    std::vector<Camera> cameras;
+    for (auto camera_dict: camera_dicts) {
+        cameras.emplace_back();
+        cameras.back().SetModelIdFromName(
+                camera_dict["model"].cast<std::string>());
+        cameras.back().SetWidth(camera_dict["width"].cast<size_t>());
+        cameras.back().SetHeight(camera_dict["height"].cast<size_t>());
+        cameras.back().SetParams(
+                camera_dict["params"].cast<std::vector<double>>());
+    }
 
     // Absolute pose estimation parameters.
-    AbsolutePoseEstimationOptions abs_pose_options;
+    GeneralizedAbsolutePoseEstimationOptions abs_pose_options;
     abs_pose_options.estimate_focal_length = false;
     abs_pose_options.ransac_options.max_error = max_error_px;
     abs_pose_options.ransac_options.min_inlier_ratio = 0.01;
@@ -84,7 +88,9 @@ py::dict generalized_absolute_pose_estimation(
     size_t num_inliers;
     std::vector<char> inlier_mask;
 
-    if (!EstimateGeneralizedAbsolutePose(abs_pose_options, points2D, points3D, rel_tforms, &qvec, &tvec, &camera, &num_inliers, &inlier_mask)) {
+    if (!EstimateGeneralizedAbsolutePose(abs_pose_options, 
+            points2D, points3D, cam_idxs, rel_camera_poses, cameras, 
+            &qvec, &tvec, &num_inliers, &inlier_mask)) {
         return failure_dict;
     }
 
@@ -95,9 +101,10 @@ py::dict generalized_absolute_pose_estimation(
     abs_pose_refinement_options.print_summary = false;
 
     // Absolute pose refinement.
-    if (!RefineAbsolutePose(abs_pose_refinement_options, inlier_mask, points2D, points3D, rel_tforms, &qvec, &tvec, &camera)) {
-        return failure_dict;
-    }
+    // if (!RefineAbsolutePose(abs_pose_refinement_options, inlier_mask, points2D, 
+    //         points3D, rel_camera_poses, &qvec, &tvec, &camera)) {
+    //     return failure_dict;
+    // }
 
     // Convert vector<char> to vector<int>.
     std::vector<bool> inliers;
