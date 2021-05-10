@@ -63,10 +63,11 @@ py::dict generalized_absolute_pose_estimation(
 
     // Create cameras.
     std::vector<Camera> cameras;
-    for (auto camera_dict: camera_dicts) {
+    for (auto& camera_dict: camera_dicts) {
         cameras.emplace_back();
         cameras.back().SetModelIdFromName(
-                camera_dict["model"].cast<std::string>());
+                //camera_dict["model"].cast<std::string>());
+                "OPENCV");
         cameras.back().SetWidth(camera_dict["width"].cast<size_t>());
         cameras.back().SetHeight(camera_dict["height"].cast<size_t>());
         cameras.back().SetParams(
