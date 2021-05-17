@@ -4,6 +4,7 @@ namespace py = pybind11;
 
 #include "absolute_pose.cc"
 #include "generalized_absolute_pose.cc"
+#include "generalized_relative_pose.cc"
 #include "essential_matrix.cc"
 #include "fundamental_matrix.cc"
 #include "transformations.cc"
@@ -23,6 +24,15 @@ PYBIND11_MODULE(pycolmap, m) {
     m.def("generalized_absolute_pose_estimation", &generalized_absolute_pose_estimation,
           py::arg("points2D"), py::arg("points3D"), 
           py::arg("cam_idxs"),
+          py::arg("rel_camera_poses"),
+          py::arg("camera_dicts"),
+          py::arg("max_error_px") = 12.0,
+          "Multi image absolute pose estimation.");
+
+    // Absolute pose from multiple images.
+    m.def("generalized_relative_pose_estimation", &generalized_relative_pose_estimation,
+          py::arg("points0"), py::arg("points1"), 
+          py::arg("cam_idxs0"), py::arg("cam_idxs1"),
           py::arg("rel_camera_poses"),
           py::arg("camera_dicts"),
           py::arg("max_error_px") = 12.0,
