@@ -47,6 +47,9 @@
 #include "colmap/util/misc.h"
 #include "colmap/util/threading.h"
 
+#include <ceres/ceres.h>
+#include <ceres/rotation.h>
+
 using namespace colmap;
 
 #include <pybind11/pybind11.h>
@@ -54,6 +57,68 @@ using namespace colmap;
 #include <pybind11/eigen.h>
 
 namespace py = pybind11;
+
+class GeneralizedRelativePoseCostFunction {
+ public:
+  GeneralizedRelativePoseCostFunction(const Eigen::Vector2d& x1, const Eigen::Vector2d& x2)
+      : x1_(x1(0)), y1_(x1(1)), x2_(x2(0)), y2_(x2(1)) {}
+
+  static ceres::CostFunction* Create(const Eigen::Vector2d& x1,
+                                     const Eigen::Vector2d& x2) {
+    return (new ceres::AutoDiffCostFunction<GeneralizedRelativePoseCostFunction, 1, 4, 3, 4, 3>(
+        new GeneralizedRelativePoseCostFunction(x1, x2)));
+  }
+
+  template <typename T>
+  bool operator()(const T* const qvec_0, const T* const tvec_0,
+                  const T* const qvec_1, const T* const tvec_1,
+                  T* residuals) const {
+    
+    // Concatenate rotations.
+    T qvec[4];
+    Eigen::Matrix<T, 4, 1> q_0_inv;
+    q_0_inv << -qvec_0[0], qvec_0[1], qvec_0[2], qvec_0[3];  
+    ceres::QuaternionProduct(qvec_1, q_0_inv.data(), qvec);
+
+    // Concatenate translations.
+    T tvec[3];
+    ceres::UnitQuaternionRotatePoint(qvec_1, tvec_0, tvec);
+    tvec[0] -= tvec_0[0];
+    tvec[1] -= tvec_0[1];
+    tvec[2] -= tvec_0[2];
+
+    Eigen::Matrix<T, 3, 3, Eigen::RowMajor> R;
+    ceres::QuaternionToRotation(qvec, R.data());
+
+    // Matrix representation of the cross product t x R.
+    Eigen::Matrix<T, 3, 3> t_x;
+    t_x << T(0), -tvec[2], tvec[1], tvec[2], T(0), -tvec[0], -tvec[1], tvec[0],
+        T(0);
+
+    // Essential matrix.
+    const Eigen::Matrix<T, 3, 3> E = t_x * R;
+
+    // Homogeneous image coordinates.
+    const Eigen::Matrix<T, 3, 1> x1_h(T(x1_), T(y1_), T(1));
+    const Eigen::Matrix<T, 3, 1> x2_h(T(x2_), T(y2_), T(1));
+
+    // Squared sampson error.
+    const Eigen::Matrix<T, 3, 1> Ex1 = E * x1_h;
+    const Eigen::Matrix<T, 3, 1> Etx2 = E.transpose() * x2_h;
+    const T x2tEx1 = x2_h.transpose() * Ex1;
+    residuals[0] = x2tEx1 * x2tEx1 /
+                   (Ex1(0) * Ex1(0) + Ex1(1) * Ex1(1) + Etx2(0) * Etx2(0) +
+                    Etx2(1) * Etx2(1));
+
+    return true;
+  }
+
+ private:
+  const double x1_;
+  const double y1_;
+  const double x2_;
+  const double y2_;
+};
 
 bool RefineSequencePose(const std::vector<char>& inlier_mask_0,
                         const std::vector<char>& inlier_mask_1,
@@ -83,14 +148,21 @@ bool RefineSequencePose(const std::vector<char>& inlier_mask_0,
   ceres::LossFunction* loss_function =
       new ceres::CauchyLoss(options.loss_function_scale);
 
-  double* camera_params_data = camera->ParamsData();
-  double* qvec_0_data = qvec_0->data();
-  double* tvec_0_data = tvec_0->data();
-
-  std::vector<Eigen::Vector3d> points3D_0_copy = points3D_0;
-
   ceres::Problem problem;
 
+
+  double* camera_params_data = camera->ParamsData();
+
+  double* qvec_0_data = qvec_0->data();
+  double* tvec_0_data = tvec_0->data();
+  std::vector<Eigen::Vector3d> points3D_0_copy = points3D_0;
+
+  double* qvec_1_data = qvec_1->data();
+  double* tvec_1_data = tvec_1->data();
+  std::vector<Eigen::Vector3d> points3D_1_copy = points3D_1;
+
+
+  // =======================   camera 0  ========================
   for (size_t i = 0; i < map_points2D_0.size(); ++i) {
     // Skip outlier observations
     if (!inlier_mask_0[i]) {
@@ -118,16 +190,63 @@ bool RefineSequencePose(const std::vector<char>& inlier_mask_0,
     problem.SetParameterBlockConstant(points3D_0_copy[i].data());
   }
 
+  // =======================   camera 1 ========================
+
+  for (size_t i = 0; i < map_points2D_1.size(); ++i) {
+    // Skip outlier observations
+    if (!inlier_mask_1[i]) {
+      continue;
+    }
+
+    ceres::CostFunction* cost_function = nullptr;
+
+    switch (camera->ModelId()) {
+#define CAMERA_MODEL_CASE(CameraModel)                                  \
+  case CameraModel::kModelId:                                           \
+    cost_function =                                                     \
+        BundleAdjustmentCostFunction<CameraModel>::Create(map_points2D_1[i]); \
+    break;
+
+      CAMERA_MODEL_SWITCH_CASES
+
+#undef CAMERA_MODEL_CASE
+    }
+
+    problem.AddResidualBlock( cost_function, loss_function, 
+                              qvec_1_data, tvec_1_data,
+                              points3D_1_copy[i].data(), 
+                              camera_params_data);
+    problem.SetParameterBlockConstant(points3D_1_copy[i].data());
+  }
+
+  // ======================= relative cost =========================
+
+  for (size_t i = 0; i < rel1_points2D_0.size(); ++i) {
+    ceres::CostFunction* cost_function = nullptr;
+    cost_function = GeneralizedRelativePoseCostFunction::Create(
+                    rel1_points2D_0[i], rel0_points2D_1[i]);
+    problem.AddResidualBlock(cost_function, loss_function, 
+                             qvec_0_data, tvec_0_data, 
+                             qvec_1_data, tvec_1_data);
+  }
+
+  // ================================================================
+
   if (problem.NumResiduals() > 0) {
     // Quaternion parameterization.
     *qvec_0 = NormalizeQuaternion(*qvec_0);
-    ceres::LocalParameterization* quaternion_parameterization =
+    ceres::LocalParameterization* quaternion_parameterization_0 =
         new ceres::QuaternionParameterization;
-    problem.SetParameterization(qvec_0_data, quaternion_parameterization);
+    problem.SetParameterization(qvec_0_data, quaternion_parameterization_0);
+
+    // Quaternion parameterization.
+    *qvec_1 = NormalizeQuaternion(*qvec_1);
+    ceres::LocalParameterization* quaternion_parameterization_1 =
+        new ceres::QuaternionParameterization;
+    problem.SetParameterization(qvec_1_data, quaternion_parameterization_1);
 
     // Camera parameterization.
     problem.SetParameterBlockConstant(camera->ParamsData());
-    
   }
 
   ceres::Solver::Options solver_options;
@@ -156,16 +275,6 @@ bool RefineSequencePose(const std::vector<char>& inlier_mask_0,
   return summary.IsSolutionUsable();
 }
 
-
-
-
-
-
-
-
-
-
-
 py::dict sequence_pose_estimation(
                             const std::vector<Eigen::Vector3d> points3D_0,
                             const std::vector<Eigen::Vector3d> points3D_1,
@@ -175,7 +284,7 @@ py::dict sequence_pose_estimation(
                             const std::vector<Eigen::Vector2d> rel0_points2D_1,
                             const py::dict camera_dict,
                             const double max_error_px) {
-    SetPRNGSeed(0);
+  SetPRNGSeed(0);
 
   // Check that both vectors have the same size.
   assert(     points3D_0.size() ==  map_points2D_0.size());
@@ -229,6 +338,7 @@ py::dict sequence_pose_estimation(
 
 
   // refinement --------------------------------------------------------------
+  /*
   if (!RefineSequencePose(inlier_mask_0,      inlier_mask_1, 
                           points3D_0,         points3D_1,
                           map_points2D_0,     map_points2D_1,
@@ -238,6 +348,7 @@ py::dict sequence_pose_estimation(
                           &camera)) {
     return failure_dict;
   }
+  */
 
   // Convert vector<char> to vector<int>.
   std::vector<bool> inliers_0;
