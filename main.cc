@@ -29,14 +29,6 @@ PYBIND11_MODULE(pycolmap, m) {
           py::arg("max_error_px") = 12.0,
           "Multi image absolute pose estimation.");
 
-    // Absolute pose from multiple images.
-    m.def("generalized_relative_pose_estimation", &generalized_relative_pose_estimation,
-          py::arg("points0"), py::arg("points1"), 
-          py::arg("cam_idxs0"), py::arg("cam_idxs1"),
-          py::arg("rel_camera_poses"),
-          py::arg("camera_dicts"),
-          py::arg("max_error_px") = 12.0,
-          "Multi image absolute pose estimation.");
 
     // Essential matrix.
     m.def("essential_matrix_estimation", &essential_matrix_estimation,
