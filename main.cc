@@ -43,6 +43,7 @@ PYBIND11_MODULE(pycolmap, m) {
           py::arg("points2D1"), py::arg("points2D2"),
           py::arg("camera_dict1"), py::arg("camera_dict2"),
           py::arg("max_error_px") = 4.0,
+          py::arg("do_refinement") = false,
           "LORANSAC + 5-point algorithm.");
 
     // Fundamental matrix.

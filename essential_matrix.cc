@@ -52,7 +52,8 @@ py::dict essential_matrix_estimation(
         const std::vector<Eigen::Vector2d> points2D2,
         const py::dict camera_dict1,
         const py::dict camera_dict2,
-        const double max_error_px
+        const double max_error_px,
+        const bool do_refinement
 ) {
     SetPRNGSeed(0);
 
@@ -131,10 +132,24 @@ py::dict essential_matrix_estimation(
     Eigen::Matrix3d R;
     Eigen::Vector3d tvec;
     std::vector<Eigen::Vector3d> points3D;
-    PoseFromEssentialMatrix(E, inlier_world_points2D1, inlier_world_points2D2, &R, &tvec, &points3D);
+    PoseFromEssentialMatrix(E, inlier_world_points2D1, inlier_world_points2D2, 
+                                                        &R, &tvec, &points3D);
 
     Eigen::Vector4d qvec = RotationMatrixToQuaternion(R);
-    
+
+    std::string refinement_outcome = "NA";
+
+    if(do_refinement) {
+        ceres::Solver::Options options;
+        const bool refinement_success = RefineRelativePose(
+            options, inlier_world_points2D1, inlier_world_points2D2, &qvec, &tvec);
+        if(refinement_success){
+            refinement_outcome="True";
+        } else {
+            refinement_outcome="False";
+        }
+    }
+
     // Convert vector<char> to vector<int>.
     std::vector<bool> inliers;
     for (auto it : inlier_mask) {
@@ -148,6 +163,7 @@ py::dict essential_matrix_estimation(
     // Success output dictionary.
     py::dict success_dict;
     success_dict["success"] = true;
+    success_dict["refinement_success"] = refinement_outcome;
     success_dict["E"] = E;
     success_dict["qvec"] = qvec;
     success_dict["tvec"] = tvec;
