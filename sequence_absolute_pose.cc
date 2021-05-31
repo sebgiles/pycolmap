@@ -74,18 +74,23 @@ class GeneralizedRelativePoseCostFunction {
                   const T* const qvec_1, const T* const tvec_1,
                   T* residuals) const {
     
+    Eigen::Matrix<T, 4, 1> q_1_inv;
+    q_1_inv << -qvec_1[0], qvec_1[1], qvec_1[2], qvec_1[3];
+    
     // Concatenate rotations.
     T qvec[4];
-    Eigen::Matrix<T, 4, 1> q_0_inv;
-    q_0_inv << -qvec_0[0], qvec_0[1], qvec_0[2], qvec_0[3];  
-    ceres::QuaternionProduct(qvec_1, q_0_inv.data(), qvec);
+    ceres::QuaternionProduct(qvec_0, q_1_inv.data(), qvec);
 
     // Concatenate translations.
     T tvec[3];
-    ceres::UnitQuaternionRotatePoint(qvec_1, tvec_0, tvec);
+    ceres::UnitQuaternionRotatePoint(qvec_0, tvec_1, tvec);
     tvec[0] -= tvec_0[0];
     tvec[1] -= tvec_0[1];
     tvec[2] -= tvec_0[2];
+    T t_length = sqrt(pow(tvec[0], 2) + pow(tvec[1], 2) + pow(tvec[2], 2));
+    tvec[0] = tvec[0]/t_length;
+    tvec[1] = tvec[1]/t_length;
+    tvec[2] = tvec[2]/t_length;
 
     Eigen::Matrix<T, 3, 3, Eigen::RowMajor> R;
     ceres::QuaternionToRotation(qvec, R.data());
@@ -338,7 +343,7 @@ py::dict sequence_pose_estimation(
 
 
   // refinement --------------------------------------------------------------
-  /*
+
   if (!RefineSequencePose(inlier_mask_0,      inlier_mask_1, 
                           points3D_0,         points3D_1,
                           map_points2D_0,     map_points2D_1,
@@ -348,7 +353,7 @@ py::dict sequence_pose_estimation(
                           &camera)) {
     return failure_dict;
   }
-  */
+
 
   // Convert vector<char> to vector<int>.
   std::vector<bool> inliers_0;
