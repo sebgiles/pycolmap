@@ -12,8 +12,8 @@ namespace py = pybind11;
 #include "sift.cc"
 
 PYBIND11_MODULE(pycolmap, m) {
-    m.doc() = "COLMAP plugin";
-
+    m.doc() = "COLMAP plugin built at " __TIMESTAMP__;
+    
     // Absolute pose.
     m.def("absolute_pose_estimation", &absolute_pose_estimation,
           py::arg("points2D"), py::arg("points3D"),
