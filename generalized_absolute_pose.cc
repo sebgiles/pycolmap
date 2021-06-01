@@ -225,11 +225,11 @@ bool RefineGeneralizedAbsolutePose(
         continue;
       Camera& camera = cameras->at(i);
 
-            //*rig_qvecs_copy[i] = NormalizeQuaternion(*rig_qvecs_copy[i])
+      //*rig_qvecs_copy[i] = NormalizeQuaternion(*rig_qvecs_copy[i])
       //ceres::LocalParameterization* quaternion_parameterization =
       //   new ceres::QuaternionParameterization;
       problem.SetParameterization(rig_qvecs_copy[i].data(), quaternion_parameterization);
-      
+
       if (!options.refine_focal_length && !options.refine_extra_params) {
         problem.SetParameterBlockConstant(camera.ParamsData());
       } else {
