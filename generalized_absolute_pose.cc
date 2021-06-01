@@ -52,7 +52,60 @@ using namespace colmap;
 #include <pybind11/stl.h>
 #include <pybind11/eigen.h>
 
+#include <ceres/ceres.h>
+#include <ceres/rotation.h>
+
 namespace py = pybind11;
+
+class CameraRigCostFunction {
+ public:
+  CameraRigCostFunction(const Eigen::Vector4d& q, const Eigen::Vector3d& t)
+      : q0_(q(0)), q1_(q(1)), q2_(q(2)), q3_(q(3)), t0_(t(0)), t1_(t(1)), t2_(t(2)) {}
+
+  static ceres::CostFunction* Create(const Eigen::Vector4d& q,
+                                     const Eigen::Vector3d& t) {
+    return (new ceres::AutoDiffCostFunction<CameraRigCostFunction, 1, 4, 3>(
+        new CameraRigCostFunction(q, t)));
+  }
+
+  template <typename T>
+  bool operator()(const T* const qvec, const T* const tvec,
+                  T* residuals) const {
+
+    T dt[3];
+    dt[0] = t0_ - tvec[0];
+    dt[1] = t1_ - tvec[1];
+    dt[2] = t2_ - tvec[2];
+
+    /*
+    T dq[4];
+    dq[0] = q0_ - qvec[0];
+    dq[1] = q1_ - qvec[1];
+    dq[2] = q2_ - qvec[2];
+    dq[3] = q3_ - qvec[3];
+    */
+    T dq = q0_*qvec[0] + q1_*qvec[1] + q2_*qvec[2] + q3_*qvec[3];
+
+    // https://math.stackexchange.com/questions/90081/quaternion-distance
+    // magic number, we have one factor for the rig poses and many for the 2d-3d matches, but probably a better way todo it
+    residuals[0] = T(10000)*(T(1)-pow(dq, 2));
+    // L2 error
+    //residuals[1] = T(10000)*sqrt(pow(dt[0], 2) + pow(dt[1], 2) + pow(dt[2], 2));
+
+    //residuals[0] = T(10000)*(dt[0]*dt[0] + dt[1]*dt[1] + dt[2]*dt[2] + dq[0]*dq[0] + dq[1]*dq[1] + dq[2]*dq[2] + dq[3]*dq[3]); 
+
+    return true;
+  }
+
+ private:
+  const double q0_;
+  const double q1_;
+  const double q2_;
+  const double q3_;
+  const double t0_;
+  const double t1_;
+  const double t2_;
+};
 
 bool RefineGeneralizedAbsolutePose(
                         const GeneralizedAbsolutePoseRefinementOptions& options,
@@ -62,6 +115,8 @@ bool RefineGeneralizedAbsolutePose(
                         const std::vector<size_t>& camera_idxs,
                         const std::vector<Eigen::Matrix3x4d>& rel_tforms,
                         Eigen::Vector4d* qvec, Eigen::Vector3d* tvec,
+                        std::vector<Eigen::Vector4d>* rig_qvecs,
+                        std::vector<Eigen::Vector3d>* rig_tvecs,
                         std::vector<Camera>* cameras) {
   CHECK_EQ(points2D.size(), inlier_mask.size());
   CHECK_EQ(points2D.size(), points3D.size());
@@ -87,12 +142,17 @@ bool RefineGeneralizedAbsolutePose(
   std::vector<Eigen::Vector4d> rig_qvecs_copy;
   std::vector<Eigen::Vector3d> rig_tvecs_copy;
 
+  std::vector<Eigen::Vector4d> rig_qvecs_original;
+  std::vector<Eigen::Vector3d> rig_tvecs_original;
+
   for (size_t i = 0; i < rel_tforms.size(); ++i) {
     Eigen::Vector3d cam_tvec = rel_tforms[i].col(3);
     Eigen::Matrix3d r_mat = rel_tforms[i].leftCols(3);
     Eigen::Vector4d cam_qvec = RotationMatrixToQuaternion(r_mat);
     rig_qvecs_copy.push_back(cam_qvec);
     rig_tvecs_copy.push_back(cam_tvec);
+    rig_qvecs_original.push_back(cam_qvec);
+    rig_tvecs_original.push_back(cam_tvec);
   }
 
   ceres::Problem problem;
@@ -127,6 +187,31 @@ bool RefineGeneralizedAbsolutePose(
     problem.SetParameterBlockConstant(points3D_copy[i].data());
   }
 
+  // Rig cost
+  for (size_t i = 0; i < cameras->size(); i++) {
+    if (camera_counts[i] == 0)
+      continue;
+
+    //if (i == 0) {
+    if (false) {
+    //if (false) {
+      problem.SetParameterBlockConstant(rig_qvecs_copy[i].data());
+      problem.SetParameterBlockConstant(rig_tvecs_copy[i].data());
+    }
+
+    else {
+      ceres::CostFunction* cost_function = nullptr;
+      cost_function =
+          CameraRigCostFunction::Create(rig_qvecs_original[i], rig_tvecs_original[i]);
+
+      problem.AddResidualBlock(cost_function, loss_function,
+                               rig_qvecs_copy[i].data(), rig_tvecs_copy[i].data());
+
+      //problem.SetParameterBlockConstant(rig_qvecs_copy[i].data());
+      problem.SetParameterBlockConstant(rig_tvecs_copy[i].data());
+    }
+  } 
+
   if (problem.NumResiduals() > 0) {
     // Quaternion parameterization.
     *qvec = NormalizeQuaternion(*qvec);
@@ -140,10 +225,11 @@ bool RefineGeneralizedAbsolutePose(
         continue;
       Camera& camera = cameras->at(i);
 
-      // We don't optimize the rig parameters (it's likely very unconstrainted)
-      problem.SetParameterBlockConstant(rig_qvecs_copy[i].data());
-      problem.SetParameterBlockConstant(rig_tvecs_copy[i].data());
-
+            //*rig_qvecs_copy[i] = NormalizeQuaternion(*rig_qvecs_copy[i])
+      //ceres::LocalParameterization* quaternion_parameterization =
+      //   new ceres::QuaternionParameterization;
+      problem.SetParameterization(rig_qvecs_copy[i].data(), quaternion_parameterization);
+      
       if (!options.refine_focal_length && !options.refine_extra_params) {
         problem.SetParameterBlockConstant(camera.ParamsData());
       } else {
@@ -183,7 +269,6 @@ bool RefineGeneralizedAbsolutePose(
       }
     }
   }
-
   ceres::Solver::Options solver_options;
   solver_options.gradient_tolerance = options.gradient_tolerance;
   solver_options.max_num_iterations = options.max_num_iterations;
@@ -206,6 +291,11 @@ bool RefineGeneralizedAbsolutePose(
   if (options.print_summary) {
     PrintHeading2("Pose refinement report");
     PrintSolverSummary(summary);
+  }
+
+  for (size_t i = 0; i < cameras->size(); i++) {
+    rig_qvecs->push_back(rig_qvecs_copy[i]);
+    rig_tvecs->push_back(rig_tvecs_copy[i]);
   }
 
   return summary.IsSolutionUsable();
@@ -267,9 +357,13 @@ py::dict generalized_absolute_pose_estimation(
     abs_pose_refinement_options.refine_extra_params = false;
     abs_pose_refinement_options.print_summary = false;
 
+
+    std::vector<Eigen::Vector4d> rig_qvecs;
+    std::vector<Eigen::Vector3d> rig_tvecs;
+
     // Absolute pose refinement.
     if (!RefineGeneralizedAbsolutePose(abs_pose_refinement_options, inlier_mask, points2D, 
-            points3D, cam_idxs, rel_camera_poses, &qvec, &tvec, &cameras)) {
+            points3D, cam_idxs, rel_camera_poses, &qvec, &tvec, &rig_qvecs, &rig_tvecs, &cameras)) {
         return failure_dict;
     }
 
@@ -288,6 +382,10 @@ py::dict generalized_absolute_pose_estimation(
     success_dict["success"] = true;
     success_dict["qvec"] = qvec;
     success_dict["tvec"] = tvec;
+    success_dict["rig_qvecs"] = rig_qvecs;
+    success_dict["rig_tvecs"] = rig_tvecs;
+    //success_dict["qvec1"] = rig_qvecs[1];
+    //success_dict["tvec1"] = rig_tvecs[1];
     success_dict["num_inliers"] = num_inliers;
     success_dict["inliers"] = inliers;
     
