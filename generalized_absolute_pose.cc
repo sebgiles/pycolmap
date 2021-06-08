@@ -47,6 +47,7 @@
 #include "colmap/base/cost_functions.h"
 
 using namespace colmap;
+using namespace ceres;
 
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
@@ -54,29 +55,60 @@ using namespace colmap;
 
 #include <ceres/ceres.h>
 #include <ceres/rotation.h>
+#include <ceres/local_parameterization.h>
+#include <ceres/internal/port.h>
 
 namespace py = pybind11;
 
-class CameraRigCostFunction {
+//class ScaleParameterization : public LocalParameterization {
+class CERES_EXPORT ScaleParameterization : public LocalParameterization {
  public:
-  CameraRigCostFunction(const Eigen::Vector4d& q, const Eigen::Vector3d& t)
-      : q0_(q(0)), q1_(q(1)), q2_(q(2)), q3_(q(3)), t0_(t(0)), t1_(t(1)), t2_(t(2)) {}
+  virtual ~ScaleParameterization() {}
+  virtual bool Plus(const double* x,
+                    const double* delta,
+                    double* x_plus_delta) const {
+    const double scale = std::sqrt(std::pow(x[0], 2) + std::pow(x[1], 2) + std::pow(x[2], 2));
+    const double new_scale = scale + delta[0];
+    x_plus_delta[0] = x[0] * new_scale / scale;
+    x_plus_delta[1] = x[1] * new_scale / scale;
+    x_plus_delta[2] = x[2] * new_scale / scale  ;
+  }
+  virtual bool ComputeJacobian(const double* x,
+                               double* jacobian) const {
+    // J = D_2 [+](x,0)
+    // [+](x,d) = x * (s + d) / s = x + x*d/s
+    // D_2[+](x,d) = x/a
+    // x = x_unit * s
+    // Jacobian size: global_size * local_size
+    const double scale = std::sqrt(std::pow(x[0], 2) + std::pow(x[1], 2) + std::pow(x[2], 2));
+    jacobian[0] = x[0] / scale;
+    jacobian[1] = x[1] / scale;
+    jacobian[2] = x[2] / scale;
+  }
+  /*
+  virtual bool MultiplyByJacobian(const double* x,
+                                  const int num_cols,
+                                  const double* global_matrix,
+                                  double* local_matrix) const {
+    
+  }
+  */
+  virtual int GlobalSize() const { return 3; }
+  virtual int LocalSize() const { return 1; }
+};
 
-  static ceres::CostFunction* Create(const Eigen::Vector4d& q,
-                                     const Eigen::Vector3d& t) {
-    return (new ceres::AutoDiffCostFunction<CameraRigCostFunction, 1, 4, 3>(
-        new CameraRigCostFunction(q, t)));
+class CameraRigRotationCostFunction {
+ public:
+  CameraRigRotationCostFunction(const Eigen::Vector4d& q)
+      : q0_(q(0)), q1_(q(1)), q2_(q(2)), q3_(q(3)) {}
+
+  static ceres::CostFunction* Create(const Eigen::Vector4d& q) {
+    return (new ceres::AutoDiffCostFunction<CameraRigRotationCostFunction, 1, 4>(
+        new CameraRigRotationCostFunction(q)));
   }
 
   template <typename T>
-  bool operator()(const T* const qvec, const T* const tvec,
-                  T* residuals) const {
-
-    T dt[3];
-    dt[0] = t0_ - tvec[0];
-    dt[1] = t1_ - tvec[1];
-    dt[2] = t2_ - tvec[2];
-
+  bool operator()(const T* const qvec, T* residuals) const {
     /*
     T dq[4];
     dq[0] = q0_ - qvec[0];
@@ -89,10 +121,6 @@ class CameraRigCostFunction {
     // https://math.stackexchange.com/questions/90081/quaternion-distance
     // magic number, we have one factor for the rig poses and many for the 2d-3d matches, but probably a better way todo it
     residuals[0] = T(10000)*(T(1)-pow(dq, 2));
-    // L2 error
-    //residuals[1] = T(10000)*sqrt(pow(dt[0], 2) + pow(dt[1], 2) + pow(dt[2], 2));
-
-    //residuals[0] = T(10000)*(dt[0]*dt[0] + dt[1]*dt[1] + dt[2]*dt[2] + dq[0]*dq[0] + dq[1]*dq[1] + dq[2]*dq[2] + dq[3]*dq[3]); 
 
     return true;
   }
@@ -102,9 +130,45 @@ class CameraRigCostFunction {
   const double q1_;
   const double q2_;
   const double q3_;
+};
+
+class CameraRigScaleCostFunction {
+ public:
+  CameraRigScaleCostFunction(const Eigen::Vector3d& t)
+      : t0_(t(0)), t1_(t(1)), t2_(t(2)) {}
+
+  static ceres::CostFunction* Create(const Eigen::Vector3d& t) {
+    return (new ceres::AutoDiffCostFunction<CameraRigScaleCostFunction, 1, 3>(
+        new CameraRigScaleCostFunction(t)));
+  }
+
+  template <typename T>
+  bool operator()(const T* const tvec, T* residuals) const {
+
+    //double orig_scale = std::sqrt(std::pow(t0_, 2) + std::pow(t1_, 2) + std::pow(t2_, 2));
+
+    T new_scale = ceres::sqrt(pow(tvec[0], 2) + pow(tvec[1], 2) + pow(tvec[2], 2));
+    /*
+    T dt[3];
+    dt[0] = t0_ - tvec[0];
+    dt[1] = t1_ - tvec[1];
+    dt[2] = t2_ - tvec[2];
+    */
+
+    // L2 error
+    // residuals[0] = T(10000)*ceres::sqrt(pow(dt[0], 2) + pow(dt[1], 2) + pow(dt[2], 2));
+     residuals[0] = T(10000)*pow(orig_scale - new_scale, 2);
+
+    //residuals[0] = T(10000)*(dt[0]*dt[0] + dt[1]*dt[1] + dt[2]*dt[2] + dq[0]*dq[0] + dq[1]*dq[1] + dq[2]*dq[2] + dq[3]*dq[3]); 
+
+    return true;
+  }
+
+ private:
   const double t0_;
   const double t1_;
   const double t2_;
+  const double orig_scale = std::sqrt(std::pow(t0_, 2) + std::pow(t1_, 2) + std::pow(t2_, 2));
 };
 
 bool RefineGeneralizedAbsolutePose(
@@ -191,24 +255,31 @@ bool RefineGeneralizedAbsolutePose(
   for (size_t i = 0; i < cameras->size(); i++) {
     if (camera_counts[i] == 0)
       continue;
-
-    //if (i == 0) {
-    if (false) {
+    if (i == 0) {
+    //if (true) {
     //if (false) {
-      problem.SetParameterBlockConstant(rig_qvecs_copy[i].data());
-      problem.SetParameterBlockConstant(rig_tvecs_copy[i].data());
-    }
 
-    else {
+      // problem.SetParameterBlockConstant(rig_qvecs_copy[i].data());
       ceres::CostFunction* cost_function = nullptr;
-      cost_function =
-          CameraRigCostFunction::Create(rig_qvecs_original[i], rig_tvecs_original[i]);
+      cost_function = CameraRigRotationCostFunction::Create(rig_qvecs_original[i]);
+      problem.AddResidualBlock(cost_function, loss_function, rig_qvecs_copy[i].data());
 
-      problem.AddResidualBlock(cost_function, loss_function,
-                               rig_qvecs_copy[i].data(), rig_tvecs_copy[i].data());
-
-      //problem.SetParameterBlockConstant(rig_qvecs_copy[i].data());
       problem.SetParameterBlockConstant(rig_tvecs_copy[i].data());
+      // ceres::CostFunction* cost_function = nullptr;
+      // cost_function = CameraRigScaleCostFunction::Create(rig_tvecs_original[i]);
+      // problem.AddResidualBlock(cost_function, loss_function, rig_tvecs_copy[i].data());
+    }
+    else {
+
+      // problem.SetParameterBlockConstant(rig_qvecs_copy[i].data());
+      ceres::CostFunction* q_cost_function = nullptr;
+      q_cost_function = CameraRigRotationCostFunction::Create(rig_qvecs_original[i]);
+      problem.AddResidualBlock(q_cost_function, loss_function, rig_qvecs_copy[i].data());
+
+      //problem.SetParameterBlockConstant(rig_tvecs_copy[i].data());
+      ceres::CostFunction* t_cost_function = nullptr;
+      t_cost_function = CameraRigScaleCostFunction::Create(rig_tvecs_original[i]);
+      problem.AddResidualBlock(t_cost_function, loss_function, rig_tvecs_copy[i].data());
     }
   } 
 
@@ -219,6 +290,9 @@ bool RefineGeneralizedAbsolutePose(
         new ceres::QuaternionParameterization;
     problem.SetParameterization(qvec_data, quaternion_parameterization);
 
+    ceres::LocalParameterization* scale_parameterization =
+        new ScaleParameterization;
+
     // Camera parameterization.
     for (size_t i = 0; i < cameras->size(); i++) {
       if (camera_counts[i] == 0)
@@ -228,7 +302,14 @@ bool RefineGeneralizedAbsolutePose(
       //*rig_qvecs_copy[i] = NormalizeQuaternion(*rig_qvecs_copy[i])
       //ceres::LocalParameterization* quaternion_parameterization =
       //   new ceres::QuaternionParameterization;
-      problem.SetParameterization(rig_qvecs_copy[i].data(), quaternion_parameterization);
+      if (i == 0) {
+        problem.SetParameterization(rig_qvecs_copy[i].data(), quaternion_parameterization);
+        // problem.SetParameterization(rig_tvecs_copy[i].data(), scale_parameterization);
+      }
+      else {
+        problem.SetParameterization(rig_qvecs_copy[i].data(), quaternion_parameterization);
+        problem.SetParameterization(rig_tvecs_copy[i].data(), scale_parameterization);
+      }
 
       if (!options.refine_focal_length && !options.refine_extra_params) {
         problem.SetParameterBlockConstant(camera.ParamsData());
