@@ -160,7 +160,7 @@ class CameraRigScaleCostFunction {
     // residuals[0] = T(10000)*ceres::sqrt(pow(dt[0], 2) + pow(dt[1], 2) + pow(dt[2], 2));
 
     // error = (s_0 - s)^2, squared to make it symmetric and convex
-    residuals[0] = T(10000)*pow(orig_scale_ - new_scale, 2)
+    residuals[0] = T(10000)*pow(orig_scale_ - new_scale, 2);
 
     //residuals[0] = T(10000)*(dt[0]*dt[0] + dt[1]*dt[1] + dt[2]*dt[2] + dq[0]*dq[0] + dq[1]*dq[1] + dq[2]*dq[2] + dq[3]*dq[3]); 
 
