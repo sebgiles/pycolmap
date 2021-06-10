@@ -86,6 +86,7 @@ class CERES_EXPORT ScaleParameterization : public LocalParameterization {
     jacobian[2] = x[2] / scale;
   }
   /*
+  // According to the documentation we most likely don't need to define this
   virtual bool MultiplyByJacobian(const double* x,
                                   const int num_cols,
                                   const double* global_matrix,
@@ -157,7 +158,9 @@ class CameraRigScaleCostFunction {
 
     // L2 error
     // residuals[0] = T(10000)*ceres::sqrt(pow(dt[0], 2) + pow(dt[1], 2) + pow(dt[2], 2));
-     residuals[0] = T(10000)*pow(orig_scale - new_scale, 2);
+
+    // error = (s_0 - s)^2, squared to make it symmetric and convex
+    residuals[0] = T(10000)*pow(orig_scale_ - new_scale, 2)
 
     //residuals[0] = T(10000)*(dt[0]*dt[0] + dt[1]*dt[1] + dt[2]*dt[2] + dq[0]*dq[0] + dq[1]*dq[1] + dq[2]*dq[2] + dq[3]*dq[3]); 
 
@@ -168,7 +171,7 @@ class CameraRigScaleCostFunction {
   const double t0_;
   const double t1_;
   const double t2_;
-  const double orig_scale = std::sqrt(std::pow(t0_, 2) + std::pow(t1_, 2) + std::pow(t2_, 2));
+  const double orig_scale_ = std::sqrt(std::pow(t0_, 2) + std::pow(t1_, 2) + std::pow(t2_, 2));
 };
 
 bool RefineGeneralizedAbsolutePose(
@@ -256,8 +259,6 @@ bool RefineGeneralizedAbsolutePose(
     if (camera_counts[i] == 0)
       continue;
     if (i == 0) {
-    //if (true) {
-    //if (false) {
 
       // problem.SetParameterBlockConstant(rig_qvecs_copy[i].data());
       ceres::CostFunction* cost_function = nullptr;
