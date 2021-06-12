@@ -60,13 +60,14 @@ namespace py = pybind11;
 
 class GeneralizedRelativePoseCostFunction {
  public:
-  GeneralizedRelativePoseCostFunction(const Eigen::Vector2d& x1, const Eigen::Vector2d& x2)
-      : x1_(x1(0)), y1_(x1(1)), x2_(x2(0)), y2_(x2(1)) {}
+  GeneralizedRelativePoseCostFunction(const Eigen::Vector2d& x1, const Eigen::Vector2d& x2, const double& weight)
+      : x1_(x1(0)), y1_(x1(1)), x2_(x2(0)), y2_(x2(1)), weight_(weight) {}
 
   static ceres::CostFunction* Create(const Eigen::Vector2d& x1,
-                                     const Eigen::Vector2d& x2) {
+                                     const Eigen::Vector2d& x2,
+                                     const double& weight) {
     return (new ceres::AutoDiffCostFunction<GeneralizedRelativePoseCostFunction, 1, 4, 3, 4, 3>(
-        new GeneralizedRelativePoseCostFunction(x1, x2)));
+        new GeneralizedRelativePoseCostFunction(x1, x2, weight)));
   }
 
   template <typename T>
@@ -111,14 +112,16 @@ class GeneralizedRelativePoseCostFunction {
     const Eigen::Matrix<T, 3, 1> Ex1 = E * x1_h;
     const Eigen::Matrix<T, 3, 1> Etx2 = E.transpose() * x2_h;
     const T x2tEx1 = x2_h.transpose() * Ex1;
-    residuals[0] = x2tEx1 * x2tEx1 /
+    residuals[0] = T(weight_) *
+    (x2tEx1 * x2tEx1 /
                    (Ex1(0) * Ex1(0) + Ex1(1) * Ex1(1) + Etx2(0) * Etx2(0) +
-                    Etx2(1) * Etx2(1));
+                    Etx2(1) * Etx2(1)));
 
     return true;
   }
 
  private:
+  const double weight_;
   const double x1_;
   const double y1_;
   const double x2_;
@@ -135,7 +138,7 @@ bool RefineSequencePose(const std::vector<char>& inlier_mask_0,
                         const std::vector<Eigen::Vector2d> rel0_points2D_1,
                         Eigen::Vector4d* qvec_0, Eigen::Vector3d* tvec_0,
                         Eigen::Vector4d* qvec_1, Eigen::Vector3d* tvec_1,
-                        Camera* camera) {
+                        Camera* camera, const double& rel_weight) {
 
   CHECK_EQ(     points3D_0.size(), inlier_mask_0.size());
   CHECK_EQ(     points3D_1.size(), inlier_mask_1.size());
@@ -229,7 +232,7 @@ bool RefineSequencePose(const std::vector<char>& inlier_mask_0,
   for (size_t i = 0; i < rel1_points2D_0.size(); ++i) {
     ceres::CostFunction* cost_function = nullptr;
     cost_function = GeneralizedRelativePoseCostFunction::Create(
-                    rel1_points2D_0[i], rel0_points2D_1[i]);
+                    rel1_points2D_0[i], rel0_points2D_1[i], rel_weight);
     problem.AddResidualBlock(cost_function, loss_function, 
                              qvec_0_data, tvec_0_data, 
                              qvec_1_data, tvec_1_data);
@@ -288,7 +291,10 @@ py::dict sequence_pose_estimation(
                             const std::vector<Eigen::Vector2d> rel1_points2D_0,
                             const std::vector<Eigen::Vector2d> rel0_points2D_1,
                             const py::dict camera_dict,
-                            const double max_error_px) {
+                            const double max_error_px, 
+                            const double rel_max_error_px, 
+                            const double rel_weight
+                            ) {
   SetPRNGSeed(0);
 
   // Check that both vectors have the same size.
@@ -328,6 +334,9 @@ py::dict sequence_pose_estimation(
                                   &camera, &num_inliers_0, &inlier_mask_0)) {
     return failure_dict;
   }
+  auto qvec_0_unref = qvec_0;
+  auto tvec_0_unref = tvec_0;
+
   
   Eigen::Vector4d qvec_1;
   Eigen::Vector3d tvec_1;
@@ -342,15 +351,69 @@ py::dict sequence_pose_estimation(
   }
 
 
+  // Relative pose est (to get inliers) ----------------------------------------------
+  // Image to world.
+  std::vector<Eigen::Vector2d> world_points2D0;
+  for (size_t idx = 0; idx < rel1_points2D_0.size(); ++idx) {
+      world_points2D0.push_back(camera.ImageToWorld(rel1_points2D_0[idx]));
+  }
+
+  std::vector<Eigen::Vector2d> world_points2D1;
+  for (size_t idx = 0; idx < rel0_points2D_1.size(); ++idx) {
+      world_points2D1.push_back(camera.ImageToWorld(rel0_points2D_1[idx]));
+  }
+  
+  // Compute world error.
+  const double max_error = rel_max_error_px / camera.MeanFocalLength();
+
+  // Essential matrix estimation parameters.
+  RANSACOptions ransac_options;
+  ransac_options.max_error = max_error;
+  ransac_options.min_inlier_ratio = 0.01;
+  ransac_options.min_num_trials = 1000;
+  ransac_options.max_num_trials = 100000;
+  ransac_options.confidence = 0.9999;
+  
+  LORANSAC<
+      EssentialMatrixFivePointEstimator,
+      EssentialMatrixFivePointEstimator
+  > ransac(ransac_options);
+
+  // Essential matrix estimation.
+  const auto report = ransac.Estimate(world_points2D0, world_points2D1);
+  if (!report.success) {
+      return failure_dict;
+  }
+  const auto num_inliers_01 = report.support.num_inliers;
+  const auto rel_inlier_mask_01 = report.inlier_mask;
+  std::vector<Eigen::Vector2d> inlier_world_points2D0;
+  std::vector<Eigen::Vector2d> inlier_world_points2D1;
+
+  for (size_t idx = 0; idx < rel_inlier_mask_01.size(); ++idx) {
+      if (rel_inlier_mask_01[idx]) {
+          inlier_world_points2D0.push_back(world_points2D0[idx]);
+          inlier_world_points2D1.push_back(world_points2D1[idx]);
+      }
+  }
+
+  // also get the relative pose for debuggging
+  const Eigen::Matrix3d E = report.model;
+  Eigen::Matrix3d R_01;
+  Eigen::Vector3d tvec_01;
+  std::vector<Eigen::Vector3d> points3D_01;
+  PoseFromEssentialMatrix(E, inlier_world_points2D0, inlier_world_points2D1, 
+                                            &R_01, &tvec_01, &points3D_01);
+  Eigen::Vector4d qvec_01 = RotationMatrixToQuaternion(R_01);
+
   // refinement --------------------------------------------------------------
 
   if (!RefineSequencePose(inlier_mask_0,      inlier_mask_1, 
                           points3D_0,         points3D_1,
                           map_points2D_0,     map_points2D_1,
-                          rel1_points2D_0,    rel0_points2D_1,
+                          inlier_world_points2D1,    inlier_world_points2D0,
                           &qvec_0,            &tvec_0, 
                           &qvec_1,            &tvec_1, 
-                          &camera)) {
+                          &camera, rel_weight)) {
     return failure_dict;
   }
 
@@ -374,18 +437,33 @@ py::dict sequence_pose_estimation(
       inliers_1.push_back(false);
     }
   }
+  // Convert vector<char> to vector<int>.
+  std::vector<bool> inliers_01;
+  for (auto it : rel_inlier_mask_01) {
+    if (it) {
+      inliers_01.push_back(true);
+    } else {
+      inliers_01.push_back(false);
+    }
+  }
 
   // Success output dictionary.
   py::dict success_dict;
   success_dict["success"] = true;
+  success_dict["qvec_0_unref"] = qvec_0_unref;
+  success_dict["tvec_0_unref"] = tvec_0_unref;
   success_dict["qvec_0"] = qvec_0;
   success_dict["tvec_0"] = tvec_0;
-  success_dict["qvec_0"] = qvec_1;
-  success_dict["tvec_0"] = tvec_1;
+  success_dict["qvec_1"] = qvec_1;
+  success_dict["tvec_1"] = tvec_1;
+  success_dict["qvec_01"] = qvec_01;
+  success_dict["tvec_01"] = tvec_01;
   success_dict["num_inliers_0"] = num_inliers_0;
   success_dict["inliers_0"] = inliers_0;
   success_dict["num_inliers_1"] = num_inliers_1;
   success_dict["inliers_1"] = inliers_1;
+  success_dict["num_inliers_rel_01"] = num_inliers_01;
+  success_dict["inliers_rel_01"] = inliers_01;
   
   return success_dict;
 }
