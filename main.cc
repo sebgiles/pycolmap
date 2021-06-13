@@ -41,6 +41,7 @@ PYBIND11_MODULE(pycolmap, m) {
           py::arg("cam_idxs"),
           py::arg("rel_camera_poses"),
           py::arg("camera_dicts"),
+          py::arg("refinement_parameters"),
           py::arg("max_error_px") = 12.0,
           "Multi image absolute pose estimation.");
 

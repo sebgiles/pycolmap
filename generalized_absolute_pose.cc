@@ -37,7 +37,7 @@
 #include "colmap/base/projection.h"
 #include "colmap/base/similarity_transform.h"
 #include "colmap/estimators/generalized_absolute_pose.h"
-#include "colmap/estimators/generalized_pose.h"
+//#include "colmap/estimators/generalized_pose.h"
 #include "colmap/optim/ransac.h"
 #include "colmap/util/random.h"
 #include "colmap/util/misc.h"
@@ -59,6 +59,80 @@ using namespace ceres;
 #include <ceres/internal/port.h>
 
 namespace py = pybind11;
+
+namespace {
+
+typedef RANSAC<GP3PEstimator> GeneralizedAbsolutePoseRANSAC;
+
+}  // namespace
+
+struct GeneralizedAbsolutePoseEstimationOptions {
+  // Whether to estimate the focal length.
+  bool estimate_focal_length = false;
+
+  // Number of discrete samples for focal length estimation.
+  size_t num_focal_length_samples = 30;
+
+  // Minimum focal length ratio for discrete focal length sampling
+  // around focal length of given camera.
+  double min_focal_length_ratio = 0.2;
+
+  // Maximum focal length ratio for discrete focal length sampling
+  // around focal length of given camera.
+  double max_focal_length_ratio = 5;
+
+  // Number of threads for parallel estimation of focal length.
+  int num_threads = ThreadPool::kMaxNumThreads;
+
+  // Options used for P3P RANSAC.
+  RANSACOptions ransac_options;
+
+  void Check() const {
+    CHECK_GT(num_focal_length_samples, 0);
+    CHECK_GT(min_focal_length_ratio, 0);
+    CHECK_GT(max_focal_length_ratio, 0);
+    CHECK_LT(min_focal_length_ratio, max_focal_length_ratio);
+    ransac_options.Check();
+  }
+};
+
+struct GeneralizedAbsolutePoseRefinementOptions {
+  // Convergence criterion.
+  double gradient_tolerance = 1.0;
+
+  // Maximum number of solver iterations.
+  int max_num_iterations = 100;
+
+  // Scaling factor determines at which residual robustification takes place.
+  double loss_function_scale = 1.0;
+
+  // Whether to refine the focal length parameter group.
+  bool refine_focal_length = true;
+
+  // Whether to refine the extra parameter group.
+  bool refine_extra_params = true;
+
+  // Whether to refine the camera rig rotation.
+  bool refine_rig_q = false;
+  
+  // Whether to refine the camera rig translation.
+  bool refine_rig_t = false;
+
+  // Whether to refine the camera rig translation.
+  bool refine_rig_scale = false;
+
+  // Weight factor for the camera rig cost function
+  int rig_cost_weight = 1;
+
+  // Whether to print final summary.
+  bool print_summary = true;
+
+  void Check() const {
+    CHECK_GE(gradient_tolerance, 0.0);
+    CHECK_GE(max_num_iterations, 0);
+    CHECK_GE(loss_function_scale, 0.0);
+  }
+};
 
 //class ScaleParameterization : public LocalParameterization {
 class CERES_EXPORT ScaleParameterization : public LocalParameterization {
@@ -94,18 +168,18 @@ class CERES_EXPORT ScaleParameterization : public LocalParameterization {
     
   }
   */
-  virtual int GlobalSize() const { return 3; }
-  virtual int LocalSize() const { return 1; }
+  virtual int GlobalSize() const { return 3; }  // How many total variables in vector
+  virtual int LocalSize() const { return 1; }   // How many free parameters
 };
 
 class CameraRigRotationCostFunction {
  public:
-  CameraRigRotationCostFunction(const Eigen::Vector4d& q)
-      : q0_(q(0)), q1_(q(1)), q2_(q(2)), q3_(q(3)) {}
+  CameraRigRotationCostFunction(const Eigen::Vector4d& q, const int& w)
+      : q0_(q(0)), q1_(q(1)), q2_(q(2)), q3_(q(3)), w_(w) {}
 
-  static ceres::CostFunction* Create(const Eigen::Vector4d& q) {
+  static ceres::CostFunction* Create(const Eigen::Vector4d& q, const int& w) {
     return (new ceres::AutoDiffCostFunction<CameraRigRotationCostFunction, 1, 4>(
-        new CameraRigRotationCostFunction(q)));
+        new CameraRigRotationCostFunction(q, w)));
   }
 
   template <typename T>
@@ -121,7 +195,7 @@ class CameraRigRotationCostFunction {
 
     // https://math.stackexchange.com/questions/90081/quaternion-distance
     // magic number, we have one factor for the rig poses and many for the 2d-3d matches, but probably a better way todo it
-    residuals[0] = T(10000)*(T(1)-pow(dq, 2));
+    residuals[0] = T(w_)*(T(1)-pow(dq, 2));
 
     return true;
   }
@@ -131,16 +205,17 @@ class CameraRigRotationCostFunction {
   const double q1_;
   const double q2_;
   const double q3_;
+  const int w_;
 };
 
 class CameraRigScaleCostFunction {
  public:
-  CameraRigScaleCostFunction(const Eigen::Vector3d& t)
-      : t0_(t(0)), t1_(t(1)), t2_(t(2)) {}
+  CameraRigScaleCostFunction(const Eigen::Vector3d& t, const int& w)
+      : t0_(t(0)), t1_(t(1)), t2_(t(2)), w_(w) {}
 
-  static ceres::CostFunction* Create(const Eigen::Vector3d& t) {
+  static ceres::CostFunction* Create(const Eigen::Vector3d& t, const int& w) {
     return (new ceres::AutoDiffCostFunction<CameraRigScaleCostFunction, 1, 3>(
-        new CameraRigScaleCostFunction(t)));
+        new CameraRigScaleCostFunction(t, w)));
   }
 
   template <typename T>
@@ -160,7 +235,7 @@ class CameraRigScaleCostFunction {
     // residuals[0] = T(10000)*ceres::sqrt(pow(dt[0], 2) + pow(dt[1], 2) + pow(dt[2], 2));
 
     // error = (s_0 - s)^2, squared to make it symmetric and convex
-    residuals[0] = T(10000)*pow(orig_scale_ - new_scale, 2);
+    residuals[0] = T(w_)*pow(orig_scale_ - new_scale, 2);
 
     //residuals[0] = T(10000)*(dt[0]*dt[0] + dt[1]*dt[1] + dt[2]*dt[2] + dq[0]*dq[0] + dq[1]*dq[1] + dq[2]*dq[2] + dq[3]*dq[3]); 
 
@@ -172,6 +247,7 @@ class CameraRigScaleCostFunction {
   const double t1_;
   const double t2_;
   const double orig_scale_ = std::sqrt(std::pow(t0_, 2) + std::pow(t1_, 2) + std::pow(t2_, 2));
+  const int w_;
 };
 
 bool RefineGeneralizedAbsolutePose(
@@ -258,29 +334,24 @@ bool RefineGeneralizedAbsolutePose(
   for (size_t i = 0; i < cameras->size(); i++) {
     if (camera_counts[i] == 0)
       continue;
-    if (i == 0) {
-
-      // problem.SetParameterBlockConstant(rig_qvecs_copy[i].data());
-      ceres::CostFunction* cost_function = nullptr;
-      cost_function = CameraRigRotationCostFunction::Create(rig_qvecs_original[i]);
-      problem.AddResidualBlock(cost_function, loss_function, rig_qvecs_copy[i].data());
-
-      problem.SetParameterBlockConstant(rig_tvecs_copy[i].data());
-      // ceres::CostFunction* cost_function = nullptr;
-      // cost_function = CameraRigScaleCostFunction::Create(rig_tvecs_original[i]);
-      // problem.AddResidualBlock(cost_function, loss_function, rig_tvecs_copy[i].data());
+    
+    if (options.refine_rig_q) {
+      ceres::CostFunction* q_cost_function = nullptr;
+      q_cost_function = CameraRigRotationCostFunction::Create(rig_qvecs_original[i], options.rig_cost_weight);
+      problem.AddResidualBlock(q_cost_function, loss_function, rig_qvecs_copy[i].data());
     }
     else {
+      problem.SetParameterBlockConstant(rig_qvecs_copy[i].data());
+    }
 
-      // problem.SetParameterBlockConstant(rig_qvecs_copy[i].data());
-      ceres::CostFunction* q_cost_function = nullptr;
-      q_cost_function = CameraRigRotationCostFunction::Create(rig_qvecs_original[i]);
-      problem.AddResidualBlock(q_cost_function, loss_function, rig_qvecs_copy[i].data());
-
-      //problem.SetParameterBlockConstant(rig_tvecs_copy[i].data());
+    // Don't refine translation of camera 1
+    if (options.refine_rig_t && i != 0) {
       ceres::CostFunction* t_cost_function = nullptr;
-      t_cost_function = CameraRigScaleCostFunction::Create(rig_tvecs_original[i]);
+      t_cost_function = CameraRigScaleCostFunction::Create(rig_tvecs_original[i], options.rig_cost_weight);
       problem.AddResidualBlock(t_cost_function, loss_function, rig_tvecs_copy[i].data());
+    }
+    else {
+      problem.SetParameterBlockConstant(rig_tvecs_copy[i].data());
     }
   } 
 
@@ -300,17 +371,10 @@ bool RefineGeneralizedAbsolutePose(
         continue;
       Camera& camera = cameras->at(i);
 
-      //*rig_qvecs_copy[i] = NormalizeQuaternion(*rig_qvecs_copy[i])
-      //ceres::LocalParameterization* quaternion_parameterization =
-      //   new ceres::QuaternionParameterization;
-      if (i == 0) {
-        problem.SetParameterization(rig_qvecs_copy[i].data(), quaternion_parameterization);
-        // problem.SetParameterization(rig_tvecs_copy[i].data(), scale_parameterization);
-      }
-      else {
-        problem.SetParameterization(rig_qvecs_copy[i].data(), quaternion_parameterization);
+      if (options.refine_rig_scale && i != 0) {
         problem.SetParameterization(rig_tvecs_copy[i].data(), scale_parameterization);
       }
+      problem.SetParameterization(rig_qvecs_copy[i].data(), quaternion_parameterization);
 
       if (!options.refine_focal_length && !options.refine_extra_params) {
         problem.SetParameterBlockConstant(camera.ParamsData());
@@ -383,12 +447,70 @@ bool RefineGeneralizedAbsolutePose(
   return summary.IsSolutionUsable();
 }
 
+bool EstimateGeneralizedAbsolutePose(
+                        const GeneralizedAbsolutePoseEstimationOptions& options,
+                        const std::vector<Eigen::Vector2d>& points2D,
+                        const std::vector<Eigen::Vector3d>& points3D,
+                        const std::vector<size_t>& cam_idxs,                                
+                        const std::vector<Eigen::Matrix3x4d>& rel_camera_poses,
+                        const std::vector<Camera>& cameras,
+                        Eigen::Vector4d* qvec, Eigen::Vector3d* tvec,
+                        size_t* num_inliers,
+                        std::vector<char>* inlier_mask) {
+  options.Check();
+
+  // TODO(sebgiles): check cameras and tforms are same length
+
+  // Normalize image coordinates.
+  std::vector<Eigen::Vector2d> points2D_normalized(points2D.size());
+  for (size_t i = 0; i < points2D.size(); ++i) {
+    points2D_normalized[i] = cameras[cam_idxs[i]].ImageToWorld(points2D[i]);
+  }
+
+  // Format data for the solver.
+  std::vector<GP3PEstimator::X_t> points2D_with_tf;
+  for (size_t i = 0; i < points2D_normalized.size(); ++i) {
+    points2D_with_tf.emplace_back();
+    points2D_with_tf.back().rel_tform = rel_camera_poses[cam_idxs[i]];
+    points2D_with_tf.back().xy = points2D_normalized[i];
+  }
+
+  // Estimate pose for given focal length.
+  auto custom_options = options;
+  custom_options.ransac_options.max_error = 
+      cameras[0].ImageToWorldThreshold(options.ransac_options.max_error);
+  GeneralizedAbsolutePoseRANSAC ransac(custom_options.ransac_options);
+  auto report = ransac.Estimate(points2D_with_tf, points3D);
+
+  Eigen::Matrix3x4d proj_matrix;
+  inlier_mask->clear();
+
+  *num_inliers = report.support.num_inliers;
+  proj_matrix = report.model;
+  *inlier_mask = report.inlier_mask;
+
+  if (*num_inliers == 0) {
+    return false;
+  }
+
+  // Extract pose parameters.
+  *qvec = RotationMatrixToQuaternion(proj_matrix.leftCols<3>());
+  *tvec = proj_matrix.rightCols<1>();
+
+  if (IsNaN(*qvec) || IsNaN(*tvec)) {
+    return false;
+  }
+
+  return true;
+}
+
 py::dict generalized_absolute_pose_estimation(
         const std::vector<Eigen::Vector2d> points2D,
         const std::vector<Eigen::Vector3d> points3D,
         const std::vector<size_t> cam_idxs,
         const std::vector<Eigen::Matrix3x4d> rel_camera_poses,
         const std::vector<py::dict> camera_dicts,
+        const py::dict refinement_parameters,
         const double max_error_px
 ) {
     SetPRNGSeed(0);
@@ -438,6 +560,10 @@ py::dict generalized_absolute_pose_estimation(
     abs_pose_refinement_options.refine_focal_length = false;
     abs_pose_refinement_options.refine_extra_params = false;
     abs_pose_refinement_options.print_summary = false;
+    abs_pose_refinement_options.refine_rig_t = refinement_parameters["refine_t"].cast<bool>();
+    abs_pose_refinement_options.refine_rig_scale = refinement_parameters["refine_scale"].cast<bool>();
+    abs_pose_refinement_options.refine_rig_q = refinement_parameters["refine_q"].cast<bool>();
+    abs_pose_refinement_options.rig_cost_weight = refinement_parameters["rig_cost_weight"].cast<int>();
 
 
     std::vector<Eigen::Vector4d> rig_qvecs;
@@ -466,8 +592,6 @@ py::dict generalized_absolute_pose_estimation(
     success_dict["tvec"] = tvec;
     success_dict["rig_qvecs"] = rig_qvecs;
     success_dict["rig_tvecs"] = rig_tvecs;
-    //success_dict["qvec1"] = rig_qvecs[1];
-    //success_dict["tvec1"] = rig_tvecs[1];
     success_dict["num_inliers"] = num_inliers;
     success_dict["inliers"] = inliers;
     
