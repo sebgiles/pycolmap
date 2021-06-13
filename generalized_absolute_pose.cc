@@ -31,16 +31,23 @@
 
 #include <iostream>
 #include <fstream>
+#include <vector>
+
+#include <Eigen/Core>
 
 #include "colmap/base/camera.h"
 #include "colmap/base/pose.h"
 #include "colmap/base/projection.h"
 #include "colmap/base/similarity_transform.h"
 #include "colmap/estimators/generalized_absolute_pose.h"
-#include "colmap/estimators/generalized_pose.h"
 #include "colmap/optim/ransac.h"
 #include "colmap/util/random.h"
 #include "colmap/util/misc.h"
+#include "colmap/util/types.h"
+#include "colmap/util/threading.h"
+#include "colmap/util/logging.h"
+#include "colmap/util/alignment.h"
+#include "colmap/util/matrix.h"
 
 #include "colmap/base/camera_models.h"
 #include "colmap/optim/bundle_adjustment.h"
@@ -59,6 +66,123 @@ using namespace ceres;
 #include <ceres/internal/port.h>
 
 namespace py = pybind11;
+
+struct GeneralizedAbsolutePoseEstimationOptions {
+  // Whether to estimate the focal length.
+  bool estimate_focal_length = false;
+
+  // Number of discrete samples for focal length estimation.
+  size_t num_focal_length_samples = 30;
+
+  // Minimum focal length ratio for discrete focal length sampling
+  // around focal length of given camera.
+  double min_focal_length_ratio = 0.2;
+
+  // Maximum focal length ratio for discrete focal length sampling
+  // around focal length of given camera.
+  double max_focal_length_ratio = 5;
+
+  // Number of threads for parallel estimation of focal length.
+  int num_threads = ThreadPool::kMaxNumThreads;
+
+  // Options used for P3P RANSAC.
+  RANSACOptions ransac_options;
+
+  void Check() const {
+    CHECK_GT(num_focal_length_samples, 0);
+    CHECK_GT(min_focal_length_ratio, 0);
+    CHECK_GT(max_focal_length_ratio, 0);
+    CHECK_LT(min_focal_length_ratio, max_focal_length_ratio);
+    ransac_options.Check();
+  }
+};
+
+struct GeneralizedAbsolutePoseRefinementOptions {
+  // Convergence criterion.
+  double gradient_tolerance = 1.0;
+
+  // Maximum number of solver iterations.
+  int max_num_iterations = 100;
+
+  // Scaling factor determines at which residual robustification takes place.
+  double loss_function_scale = 1.0;
+
+  // Whether to refine the focal length parameter group.
+  bool refine_focal_length = true;
+
+  // Whether to refine the extra parameter group.
+  bool refine_extra_params = true;
+
+  // Whether to print final summary.
+  bool print_summary = true;
+
+  void Check() const {
+    CHECK_GE(gradient_tolerance, 0.0);
+    CHECK_GE(max_num_iterations, 0);
+    CHECK_GE(loss_function_scale, 0.0);
+  }
+};
+
+typedef RANSAC<GP3PEstimator> GeneralizedAbsolutePoseRANSAC;
+
+bool EstimateGeneralizedAbsolutePose(
+                        const GeneralizedAbsolutePoseEstimationOptions& options,
+                        const std::vector<Eigen::Vector2d>& points2D,
+                        const std::vector<Eigen::Vector3d>& points3D,
+                        const std::vector<size_t>& cam_idxs,                                
+                        const std::vector<Eigen::Matrix3x4d>& rel_camera_poses,
+                        const std::vector<Camera>& cameras,
+                        Eigen::Vector4d* qvec, Eigen::Vector3d* tvec,
+                        size_t* num_inliers,
+                        std::vector<char>* inlier_mask) {
+  options.Check();
+
+  CHECK_EQ(rel_camera_poses.size(), cameras.size());
+  CHECK_EQ(points2D.size(), points3D.size());
+  CHECK_EQ(points2D.size(), cam_idxs.size());
+
+  // Normalize image coordinates.
+  std::vector<Eigen::Vector2d> points2D_normalized(points2D.size());
+  for (size_t i = 0; i < points2D.size(); ++i) {
+    points2D_normalized[i] = cameras[cam_idxs[i]].ImageToWorld(points2D[i]);
+  }
+
+  // Format data for the solver.
+  std::vector<GP3PEstimator::X_t> points2D_with_tf;
+  for (size_t i = 0; i < points2D_normalized.size(); ++i) {
+    points2D_with_tf.emplace_back();
+    points2D_with_tf.back().rel_tform = rel_camera_poses[cam_idxs[i]];
+    points2D_with_tf.back().xy = points2D_normalized[i];
+  }
+
+  // Estimate pose for given focal length.
+  auto custom_options = options;
+  custom_options.ransac_options.max_error = 
+      cameras[0].ImageToWorldThreshold(options.ransac_options.max_error);
+  GeneralizedAbsolutePoseRANSAC ransac(custom_options.ransac_options);
+  auto report = ransac.Estimate(points2D_with_tf, points3D);
+
+  Eigen::Matrix3x4d proj_matrix;
+  inlier_mask->clear();
+
+  *num_inliers = report.support.num_inliers;
+  proj_matrix = report.model;
+  *inlier_mask = report.inlier_mask;
+
+  if (*num_inliers == 0) {
+    return false;
+  }
+
+  // Extract pose parameters.
+  *qvec = RotationMatrixToQuaternion(proj_matrix.leftCols<3>());
+  *tvec = proj_matrix.rightCols<1>();
+
+  if (IsNaN(*qvec) || IsNaN(*tvec)) {
+    return false;
+  }
+
+  return true;
+}
 
 //class ScaleParameterization : public LocalParameterization {
 class CERES_EXPORT ScaleParameterization : public LocalParameterization {

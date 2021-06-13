@@ -5,7 +5,6 @@ namespace py = pybind11;
 #include "absolute_pose.cc"
 #include "sequence_absolute_pose.cc"
 #include "generalized_absolute_pose.cc"
-#include "generalized_relative_pose.cc"
 #include "essential_matrix.cc"
 #include "fundamental_matrix.cc"
 #include "transformations.cc"
