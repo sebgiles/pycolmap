@@ -159,15 +159,6 @@ class CERES_EXPORT ScaleParameterization : public LocalParameterization {
     jacobian[1] = x[1] / scale;
     jacobian[2] = x[2] / scale;
   }
-  /*
-  // According to the documentation we most likely don't need to define this
-  virtual bool MultiplyByJacobian(const double* x,
-                                  const int num_cols,
-                                  const double* global_matrix,
-                                  double* local_matrix) const {
-    
-  }
-  */
   virtual int GlobalSize() const { return 3; }  // How many total variables in vector
   virtual int LocalSize() const { return 1; }   // How many free parameters
 };
@@ -184,17 +175,10 @@ class CameraRigRotationCostFunction {
 
   template <typename T>
   bool operator()(const T* const qvec, T* residuals) const {
-    /*
-    T dq[4];
-    dq[0] = q0_ - qvec[0];
-    dq[1] = q1_ - qvec[1];
-    dq[2] = q2_ - qvec[2];
-    dq[3] = q3_ - qvec[3];
-    */
+
     T dq = q0_*qvec[0] + q1_*qvec[1] + q2_*qvec[2] + q3_*qvec[3];
 
     // https://math.stackexchange.com/questions/90081/quaternion-distance
-    // magic number, we have one factor for the rig poses and many for the 2d-3d matches, but probably a better way todo it
     residuals[0] = T(w_)*(T(1)-pow(dq, 2));
 
     return true;
@@ -221,23 +205,10 @@ class CameraRigScaleCostFunction {
   template <typename T>
   bool operator()(const T* const tvec, T* residuals) const {
 
-    //double orig_scale = std::sqrt(std::pow(t0_, 2) + std::pow(t1_, 2) + std::pow(t2_, 2));
-
     T new_scale = ceres::sqrt(pow(tvec[0], 2) + pow(tvec[1], 2) + pow(tvec[2], 2));
-    /*
-    T dt[3];
-    dt[0] = t0_ - tvec[0];
-    dt[1] = t1_ - tvec[1];
-    dt[2] = t2_ - tvec[2];
-    */
-
-    // L2 error
-    // residuals[0] = T(10000)*ceres::sqrt(pow(dt[0], 2) + pow(dt[1], 2) + pow(dt[2], 2));
 
     // error = (s_0 - s)^2, squared to make it symmetric and convex
     residuals[0] = T(w_)*pow(orig_scale_ - new_scale, 2);
-
-    //residuals[0] = T(10000)*(dt[0]*dt[0] + dt[1]*dt[1] + dt[2]*dt[2] + dq[0]*dq[0] + dq[1]*dq[1] + dq[2]*dq[2] + dq[3]*dq[3]); 
 
     return true;
   }
